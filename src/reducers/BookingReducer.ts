@@ -1,7 +1,8 @@
 import { createAsyncThunk, createSlice, PayloadAction } from "@reduxjs/toolkit";
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 import Booking, { BookingDetails, CartItem, Customer } from "../models/Booking";
 import { Car } from "../models/Car";
+import authService from "../reducers/AuthenticationService";
 
 interface BookingState {
     bookings: Booking[];
@@ -19,55 +20,109 @@ const initialState: BookingState = {
     error: null
 };
 
-const api = axios.create({
-    baseURL: 'http://localhost:3000'
-});
+const securedApiCall = async (apiCall: () => Promise<any>) => {
+    try {
+        return await apiCall();
+    } catch (error) {
+        const axiosError = error as AxiosError;
 
-// Thunks for API calls
+        if (axiosError.response?.status === 401) {
+            try {
+                await authService.refreshToken();
+                return await apiCall();
+            } catch (refreshError) {
+                authService.logout();
+                throw refreshError;
+            }
+        }
+
+        throw error;
+    }
+};
+
+const createSecuredApi = () => {
+    const token = localStorage.getItem('accessToken');
+
+    return axios.create({
+        baseURL: 'http://localhost:3000',
+        headers: {
+            'Authorization': token ? `Bearer ${token}` : '',
+            'Content-Type': 'application/json'
+        }
+    });
+};
+
 export const getBookings = createAsyncThunk(
     'booking/getBookings',
-    async () => {
+    async (_, { rejectWithValue }) => {
         try {
-            const response = await api.get('/booking/view');
-            return response.data;
+            return await securedApiCall(async () => {
+                const api = createSecuredApi();
+                const response = await api.get('/booking/view');
+                return response.data;
+            });
         } catch (error) {
-            console.log(error);
-            throw error;
+            const axiosError = error as AxiosError;
+            console.log(axiosError);
+            return rejectWithValue(axiosError.response?.data || 'Failed to fetch bookings');
         }
     }
 );
 
 export const getCustomers = createAsyncThunk(
     'booking/getCustomers',
-    async () => {
+    async (_, { rejectWithValue }) => {
         try {
-            const response = await api.get('/customer/view');
-            return response.data;
+            return await securedApiCall(async () => {
+                const api = createSecuredApi();
+                const response = await api.get('/customer/view');
+                return response.data;
+            });
         } catch (error) {
-            console.log(error);
-            throw error;
+            const axiosError = error as AxiosError;
+            console.log(axiosError);
+            return rejectWithValue(axiosError.response?.data || 'Failed to fetch customers');
         }
     }
 );
 
 export const createBooking = createAsyncThunk(
     'booking/createBooking',
-    async (booking: Booking, { dispatch }) => {
+    async (booking: Booking, { dispatch, rejectWithValue }) => {
         try {
-            const response = await api.post('/booking/add', booking);
+            return await securedApiCall(async () => {
+                const api = createSecuredApi();
+                const response = await api.post('/booking/add', booking);
 
-            // Update all cars in the booking to "Booked"
-            for (const detail of booking.BookingDetails) {
-                await api.put(`/car/update/${detail.CarID}`, { Availability: "Booked" });
-            }
+                for (const detail of booking.BookingDetails) {
+                    await api.put(`/car/update/${detail.CarID}`, { Availability: "Booked" });
+                }
 
-            // Refresh car list after updating
-            dispatch({ type: 'car/getCars' });
+                dispatch({ type: 'car/getCars' });
 
-            return response.data;
+                return response.data;
+            });
         } catch (error) {
-            console.log(error);
-            throw error;
+            const axiosError = error as AxiosError;
+            console.log(axiosError);
+            return rejectWithValue(axiosError.response?.data || 'Failed to create booking');
+        }
+    }
+);
+
+export const getUserBookings = createAsyncThunk(
+    'booking/getUserBookings',
+    async (userId: string, { rejectWithValue }) => {
+        try {
+            return await securedApiCall(async () => {
+                const api = createSecuredApi();
+                const response = await api.get(`/booking/user/${userId}`);
+                return response.data;
+            });
+        } catch (error) {
+            const axiosError = error as AxiosError;
+            console.log(axiosError);
+            return rejectWithValue(axiosError.response?.data || 'Failed to fetch user bookings');
         }
     }
 );
@@ -77,7 +132,6 @@ const bookingSlice = createSlice({
     initialState,
     reducers: {
         addToCart: (state, action: PayloadAction<CartItem>) => {
-            // Check if car is already in cart
             const exists = state.cart.find(item => item.CarID === action.payload.CarID);
             if (!exists) {
                 state.cart.push(action.payload);
@@ -92,7 +146,6 @@ const bookingSlice = createSlice({
     },
     extraReducers: (builder) => {
         builder
-            // Get Bookings
             .addCase(getBookings.pending, (state) => {
                 state.loading = true;
                 state.error = null;
@@ -103,10 +156,9 @@ const bookingSlice = createSlice({
             })
             .addCase(getBookings.rejected, (state, action) => {
                 state.loading = false;
-                state.error = action.error.message || "Failed to fetch bookings";
+                state.error = action.payload as string || "Failed to fetch bookings";
             })
 
-            // Get Customers
             .addCase(getCustomers.pending, (state) => {
                 state.loading = true;
                 state.error = null;
@@ -117,22 +169,34 @@ const bookingSlice = createSlice({
             })
             .addCase(getCustomers.rejected, (state, action) => {
                 state.loading = false;
-                state.error = action.error.message || "Failed to fetch customers";
+                state.error = action.payload as string || "Failed to fetch customers";
             })
 
-            // Create Booking
             .addCase(createBooking.pending, (state) => {
                 state.loading = true;
                 state.error = null;
             })
             .addCase(createBooking.fulfilled, (state, action) => {
                 state.bookings.push(action.payload);
-                state.cart = []; // Clear cart after successful booking
+                state.cart = [];
                 state.loading = false;
             })
             .addCase(createBooking.rejected, (state, action) => {
                 state.loading = false;
-                state.error = action.error.message || "Failed to create booking";
+                state.error = action.payload as string || "Failed to create booking";
+            })
+
+            .addCase(getUserBookings.pending, (state) => {
+                state.loading = true;
+                state.error = null;
+            })
+            .addCase(getUserBookings.fulfilled, (state, action) => {
+                state.bookings = action.payload;
+                state.loading = false;
+            })
+            .addCase(getUserBookings.rejected, (state, action) => {
+                state.loading = false;
+                state.error = action.payload as string || "Failed to fetch your bookings";
             });
     }
 });
